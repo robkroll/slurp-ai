@@ -232,12 +232,9 @@ describe('slurpWorkflow', () => {
     const testUrl = 'https://example.com/docs/v1/target-lib';
     // New naming: uses domain name, adds -docs if path starts with /docs
     const expectedSiteName = 'example-docs';
-    const expectedPartialsBase = path.join('/test/base', 'slurp_partials_env'); // From env
-    const expectedCompiledBase = path.join('/test/base', 'compiled_env'); // From env
-    const expectedPartialsDir = path.join(expectedPartialsBase, expectedSiteName);
-    // Name includes -docs suffix since path starts with /docs
-    const expectedCompiledFile = path.join(expectedCompiledBase, `${expectedSiteName}.md`);
-    const expectedCompiledFileRelative = path.relative('/test/base', expectedCompiledFile);
+    // Output goes directly to paths.outputDir/<siteName>/ (no compile step)
+    const expectedOutputBase = path.join('/test/base', 'compiled_env'); // paths.outputDir from mocked config
+    const expectedOutputDir = path.join(expectedOutputBase, expectedSiteName);
 
     it('should run the full workflow successfully with default options', async () => {
       // Re-mock cwd to ensure it's used consistently in this test
@@ -255,62 +252,39 @@ describe('slurpWorkflow', () => {
         failed: 1,
         duration: 3.0
       });
-      mockCompilerInstance.compile.mockResolvedValue({
-        outputFile: expectedCompiledFile,
-        stats: {
-          processedFiles: 10,
-          totalFiles: 10,
-          skippedFiles: 0,
-          duplicatesRemoved: 0
-        }
-      });
-      
+
       // Reset the constructor mocks to ensure they return our prepared instances
       DocumentationScraper.mockImplementation(() => mockScraperInstance);
-      MarkdownCompiler.mockImplementation(() => mockCompilerInstance);
-      
+
       // Setup filesystem mocks
       fs.ensureDir.mockResolvedValue(undefined);
       fs.remove.mockResolvedValue(undefined);
       
       const result = await runSlurpWorkflow(testUrl);
 
-      // Check setup - use actual path or flexible matching
-      expect(fs.ensureDir).toHaveBeenCalledWith(expect.stringContaining('slurp_partials_env/example-docs'));
+      // Check output directory was created
       expect(fs.ensureDir).toHaveBeenCalledWith(expect.stringContaining('compiled_env'));
+      expect(fs.ensureDir).toHaveBeenCalledWith(expect.stringContaining('example-docs'));
 
       // Check Scraper instantiation and execution with flexible path matching
       expect(DocumentationScraper).toHaveBeenCalledWith(expect.objectContaining({
         baseUrl: testUrl,
-        // Use a more flexible matcher for paths since they may vary by environment
-        outputDir: expect.stringContaining('slurp_partials_env/example-docs'),
+        outputDir: expect.stringContaining('example-docs'),
         libraryInfo: expect.objectContaining({ library: expectedSiteName, version: '' }),
-        // Check some defaults passed from workflow logic/env
-        maxPages: 20, // Default in workflow if not passed/env
-        useHeadless: true, // Default in workflow
-        concurrency: 10, // Default in workflow
+        maxPages: 20,
+        useHeadless: true,
+        concurrency: 10,
       }));
       expect(mockScraperInstance.start).toHaveBeenCalledOnce();
 
-      // Check Compiler instantiation and execution with flexible path matching
-      expect(MarkdownCompiler).toHaveBeenCalledWith(expect.objectContaining({
-        // Use string matching for paths
-        inputDir: expect.stringContaining('slurp_partials_env/example-docs'),
-        outputFile: expect.stringContaining(`${expectedSiteName}.md`),
-        // Check some defaults passed from workflow logic/env
-        preserveMetadata: true,
-        removeNavigation: true,
-        removeDuplicates: true,
-      }));
-      expect(mockCompilerInstance.compile).toHaveBeenCalledOnce();
+      // No compiler should be used in the new workflow
+      expect(MarkdownCompiler).not.toHaveBeenCalled();
+      // No deletion of output dir
+      expect(fs.remove).not.toHaveBeenCalled();
 
-      // Check cleanup - use expect.any(String) for paths
-      expect(fs.remove).toHaveBeenCalledWith(expect.stringContaining('example-docs'));
-
-      // Check result - use flexible path matching since relative paths depend on cwd mock timing
+      // Check result
       expect(result.success).toBe(true);
-      expect(result.compiledFilePath).toContain('example-docs.md');
-      // New logger uses log.done instead of log.final
+      expect(result.outputDir).toContain('example-docs');
       expect(log.done).toHaveBeenCalled();
     });
 
@@ -333,60 +307,35 @@ describe('slurpWorkflow', () => {
         const options = {
             version: '2.1.0',
             partialsOutputDir: 'custom_partials',
-            compiledOutputDir: 'custom_compiled',
             maxPages: 15,
             useHeadless: false,
             concurrency: 5,
-            deletePartials: false, // Override cleanup
-            preserveMetadata: false, // Override compiler option
         };
-        const expectedCustomPartialsBase = path.join('/test/base', 'custom_partials');
-        const expectedCustomCompiledBase = path.join('/test/base', 'custom_compiled');
-        const expectedCustomPartialsDir = path.join(expectedCustomPartialsBase, expectedSiteName, options.version);
-        const expectedCustomCompiledFile = path.join(expectedCustomCompiledBase, `${expectedSiteName}_${options.version}.md`);
-        const expectedCustomCompiledFileRelative = path.relative('/test/base', expectedCustomCompiledFile);
-
-        // Update mock compiler path for this test
-        mockCompilerInstance.compile.mockResolvedValue({
-            outputFile: expectedCustomCompiledFile,
-            stats: { processedFiles: 5 }
-        });
-
 
         // Reset the constructor mocks to ensure they return our prepared instances
         DocumentationScraper.mockImplementation(() => mockScraperInstance);
-        MarkdownCompiler.mockImplementation(() => mockCompilerInstance);
-        
+
         const result = await runSlurpWorkflow(testUrl, options);
 
         // Check paths with version and custom dirs - use flexible matchers
-        expect(fs.ensureDir).toHaveBeenCalledWith(expect.stringContaining(`custom_partials/example-docs/2.1.0`));
-        expect(fs.ensureDir).toHaveBeenCalledWith(expect.stringContaining('custom_compiled'));
+        expect(fs.ensureDir).toHaveBeenCalledWith(expect.stringContaining(`custom_partials`));
+        expect(fs.ensureDir).toHaveBeenCalledWith(expect.stringContaining('example-docs'));
 
         // Check options passed to Scraper - use flexible path matching
         expect(DocumentationScraper).toHaveBeenCalledWith(expect.objectContaining({
-            // Use string matching instead of exact path matching
-            outputDir: expect.stringContaining(`custom_partials/example-docs/${options.version}`),
+            outputDir: expect.stringContaining(`example-docs`),
             libraryInfo: expect.objectContaining({ library: expectedSiteName, version: options.version }),
             maxPages: options.maxPages,
             useHeadless: options.useHeadless,
             concurrency: options.concurrency,
         }));
 
-        // Check options passed to Compiler with flexible path matching
-        expect(MarkdownCompiler).toHaveBeenCalledWith(expect.objectContaining({
-            // Use string matching for paths
-            inputDir: expect.stringContaining(`custom_partials/example-docs/${options.version}`),
-            outputFile: expect.stringContaining(`${expectedSiteName}_${options.version}.md`),
-            preserveMetadata: options.preserveMetadata,
-        }));
+        // No compiler used
+        expect(MarkdownCompiler).not.toHaveBeenCalled();
 
-        // Check cleanup skipped
-        expect(fs.remove).not.toHaveBeenCalled();
-
-        // Check result - use flexible path matching since relative paths depend on cwd mock timing
+        // Check result
         expect(result.success).toBe(true);
-        expect(result.compiledFilePath).toContain('example-docs_2.1.0.md');
+        expect(result.outputDir).toContain('example-docs');
      });
 
      it('should handle invalid URL input by throwing an error', async () => {
@@ -405,8 +354,9 @@ describe('slurpWorkflow', () => {
         const result = await runSlurpWorkflow(testUrl);
 
         expect(mockScraperInstance.start).toHaveBeenCalledOnce();
-        expect(MarkdownCompiler).not.toHaveBeenCalled(); // Compiler shouldn't run
-        expect(fs.remove).toHaveBeenCalledWith(expect.stringContaining('example-docs')); // Cleanup should still attempt
+        expect(MarkdownCompiler).not.toHaveBeenCalled();
+        // No cleanup of output dir in new workflow (files are final output)
+        expect(fs.remove).not.toHaveBeenCalled();
         expect(log.error).toHaveBeenCalledWith('Workflow', `Slurp workflow failed: ${scrapeError.message}`);
         expect(result).toEqual({
             success: false,
@@ -414,7 +364,7 @@ describe('slurpWorkflow', () => {
         });
      });
 
-      it('should handle compiler failure', async () => {
+      it('should handle scraper error gracefully', async () => {
         // Reset mocks and re-mock cwd
         vi.resetAllMocks();
         vi.spyOn(process, 'cwd').mockReturnValue('/test/base');
@@ -422,78 +372,57 @@ describe('slurpWorkflow', () => {
         // Re-setup sitemap mocks after reset
         fetchSitemap.mockResolvedValue({ found: false, urls: [], count: 0 });
 
-        // Setup fresh mocks
-        const compileError = new Error('Compilation exploded');
-        mockScraperInstance.start.mockResolvedValue({
-          processed: 10,
-          failed: 1,
-          duration: 2.5
-        });
-        mockCompilerInstance.compile.mockRejectedValue(compileError);
-        // Ensure MarkdownCompiler constructor returns our mock instance
-        MarkdownCompiler.mockImplementation(() => mockCompilerInstance);
-
-        // Make sure DocumentationScraper is correctly wired
+        // Setup fresh mocks - scraper throws
+        const scrapeError = new Error('Network failure');
+        mockScraperInstance.start.mockRejectedValue(scrapeError);
         DocumentationScraper.mockImplementation(() => mockScraperInstance);
         
         const result = await runSlurpWorkflow(testUrl);
 
-        // Test that the scraper was called correctly
         expect(DocumentationScraper).toHaveBeenCalled();
         expect(mockScraperInstance.start).toHaveBeenCalledOnce();
-        
-        // Test for cleanup with flexible path matching
-        expect(fs.remove).toHaveBeenCalledWith(expect.stringContaining('slurp_partials_env/example-docs')); // Cleanup with flexible matcher
-        expect(log.error).toHaveBeenCalledWith('Workflow', `Slurp workflow failed: ${compileError.message}`);
+        expect(MarkdownCompiler).not.toHaveBeenCalled();
+        expect(log.error).toHaveBeenCalledWith('Workflow', `Slurp workflow failed: ${scrapeError.message}`);
         expect(result).toEqual({
             success: false,
-            error: compileError,
+            error: scrapeError,
         });
       });
 
-      it('should return failure and cleanup if scraper processes zero pages', async () => {
+      it('should return failure if scraper processes zero pages', async () => {
          // Reset mocks for this test
          vi.resetAllMocks();
 
          // Re-setup sitemap mocks after reset
          fetchSitemap.mockResolvedValue({ found: false, urls: [], count: 0 });
 
-         // Setup scraper to return zero processed pages
-         const zeroProcessedError = "Scraping completed, but no pages were successfully processed. Cannot compile.";
-         
-         // First let it return the stats
          mockScraperInstance.start.mockResolvedValue({
            processed: 0,
            failed: 5,
            duration: 1.5
          });
          
-         // Ensure our mock instance is used
          DocumentationScraper.mockImplementation(() => mockScraperInstance);
          
          const result = await runSlurpWorkflow(testUrl);
-expect(mockScraperInstance.start).toHaveBeenCalledOnce();
-expect(MarkdownCompiler).not.toHaveBeenCalled(); // Compiler shouldn't run
-expect(fs.remove).toHaveBeenCalledWith(expect.stringContaining('example-docs')); // Use flexible path matcher
+         expect(mockScraperInstance.start).toHaveBeenCalledOnce();
+         expect(MarkdownCompiler).not.toHaveBeenCalled();
 
-// Check the error is logged correctly with the stage parameter
-         // Check the error is logged correctly with the stage parameter
          expect(log.error).toHaveBeenCalledWith(
            'Workflow',
-           expect.stringContaining(zeroProcessedError)
+           expect.stringContaining('no pages were successfully processed')
          );
          
-         // Check the result contains the error
          expect(result).toEqual({
              success: false,
              error: expect.objectContaining({
-               message: expect.stringContaining(zeroProcessedError)
+               message: expect.stringContaining('no pages were successfully processed')
              })
          });
       });
 
 
-       it('should skip partials deletion if deletePartials is false', async () => {
+       it('should not delete output files after successful scraping', async () => {
             // Reset mocks and re-mock cwd
             vi.resetAllMocks();
             vi.spyOn(process, 'cwd').mockReturnValue('/test/base');
@@ -501,29 +430,23 @@ expect(fs.remove).toHaveBeenCalledWith(expect.stringContaining('example-docs'));
             // Re-setup sitemap mocks after reset
             fetchSitemap.mockResolvedValue({ found: false, urls: [], count: 0 });
 
-            // Re-setup scraper to return proper stats
             mockScraperInstance.start.mockResolvedValue({
                 processed: 10,
                 failed: 1,
                 duration: 1.0
             });
             
-            // Ensure mock instances are used
             DocumentationScraper.mockImplementation(() => mockScraperInstance);
-            MarkdownCompiler.mockImplementation(() => mockCompilerInstance);
-            
-            await runSlurpWorkflow(testUrl, { deletePartials: false });
+
+            await runSlurpWorkflow(testUrl);
+            // Output files are the final product — never deleted
             expect(fs.remove).not.toHaveBeenCalled();
         });
 
-       it('should skip partials deletion if compilation processes zero files (even if deletePartials is true)', async () => {
-            // Create fresh clean mocks to avoid interference from previous tests
+       it('should complete successfully without a compiler step', async () => {
             vi.clearAllMocks();
-
-            // Re-setup sitemap mocks after clear
             fetchSitemap.mockResolvedValue({ found: false, urls: [], count: 0 });
 
-            // Important: Mock everything from scratch for this test case
             const freshScraperInstance = {
                 start: vi.fn().mockResolvedValue({
                     processed: 5,
@@ -534,33 +457,16 @@ expect(fs.remove).toHaveBeenCalledWith(expect.stringContaining('example-docs'));
                 emit: vi.fn()
             };
 
-            const freshCompilerInstance = {
-                compile: vi.fn().mockResolvedValue({
-                    outputFile: expectedCompiledFile,
-                    stats: {
-                        processedFiles: 0, // This is the key - zero files processed
-                        totalFiles: 10
-                    }
-                }),
-                setMetadata: vi.fn() // Required for metadata setting
-            };
-            
-            // Override the class mocks with our fresh instances
             DocumentationScraper.mockImplementation(() => freshScraperInstance);
-            MarkdownCompiler.mockImplementation(() => freshCompilerInstance);
-            
-            // Reset file system mocks
             fs.ensureDir.mockResolvedValue(undefined);
             fs.remove.mockResolvedValue(undefined);
             
-            // Run the workflow with deletePartials explicitly set to true
-            await runSlurpWorkflow(testUrl, { deletePartials: true });
-            
-            // Verify that removal was not called
+            const result = await runSlurpWorkflow(testUrl);
+
+            // No compiler used at all
+            expect(MarkdownCompiler).not.toHaveBeenCalled();
             expect(fs.remove).not.toHaveBeenCalled();
-            
-            // Verify that the verbose log was called
-            expect(log.verbose).toHaveBeenCalledWith(expect.stringContaining('Skipping partials deletion as no files were compiled.'));
+            expect(result.success).toBe(true);
        });
 
        it('should call onProgress callback during scraping', async () => {

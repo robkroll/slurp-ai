@@ -33,6 +33,11 @@ const config = {
       'tutorial',
       'example',
       'doc',
+      'helpcontent',
+      'content',
+      'help',
+      'manual',
+      'kb',
     ],
   },
 

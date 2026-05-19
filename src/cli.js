@@ -65,11 +65,14 @@ Options:
   --output <dir>           Output directory for partial files (default: ./slurp_partials or SLURP_OUTPUT_DIR)
   --max <number>           Maximum pages to scrape (default: 20)
   --headless <boolean>     Use headless browser (default: true)
+  --login                  Open a visible browser so you can log in before scraping (useful for sites behind authentication)
   --concurrency <number>   Number of concurrent pages (default: 5)
   --retry-count <number>   Number of retries for failed requests (default: 3)
   --retry-delay <number>   Delay between retries in ms (default: 1000)
   --base-path <url>        URL prefix required for scraped links (if SLURP_ENFORCE_BASE_PATH=true). Defaults to start URL.
   --keep-partials          Keep individual markdown files after compilation (for RAG use)
+  --folder <name>          Custom folder name for output (overrides auto-detected name)
+  --save-input             Save raw HTML files to slurps_input/<name> for debugging
   --yes                    Skip confirmation prompts
 
 RAG Options:
@@ -132,11 +135,28 @@ async function main() {
   // Check for direct URL mode first (before entering the switch)
   if (command && isUrl(command)) {
     const url = command;
+
+    // Prominent login notice — shown before the browser opens
+    if (params.login) {
+      // eslint-disable-next-line no-console
+      console.log(`
+╔══════════════════════════════════════════════════════════╗
+║                   LOGIN MODE ACTIVE                      ║
+║                                                          ║
+║  A visible browser window will open at the target URL.   ║
+║  Please log in and navigate to the documentation page.   ║
+║  When you are ready, press Enter in this terminal to     ║
+║  begin scraping.                                         ║
+╚══════════════════════════════════════════════════════════╝
+`);
+    }
+
     // Prepare options for the workflow function based on CLI params
     const workflowOptions = {
       // Pass relevant options parsed from 'params' object
       maxPages: params.max ? parseInt(params.max, 10) : undefined,
       useHeadless: params.headless !== 'false' ? undefined : false, // Only pass if explicitly false
+      loginFirst: params.login ? true : undefined,
       concurrency: params.concurrency
         ? parseInt(params.concurrency, 10)
         : undefined,
@@ -146,8 +166,9 @@ async function main() {
       retryDelay: params['retry-delay']
         ? parseInt(params['retry-delay'], 10)
         : undefined,
-      // Add base path handling
-      basePath: params['base-path'] || url, // Default to url if --base-path is not provided
+      // Only pass basePath when explicitly provided via --base-path; otherwise
+      // the workflow will derive a sensible default from the URL's directory.
+      basePath: params['base-path'] || undefined,
       // Keep partials for RAG use cases
       deletePartials: params['keep-partials'] || params.rag ? false : undefined,
       // RAG options - one file per page with clean names
@@ -160,6 +181,10 @@ async function main() {
       chunkOverlap: params['chunk-overlap']
         ? parseInt(params['chunk-overlap'], 10)
         : undefined,
+      // Custom folder name for output directory
+      folder: params.folder || undefined,
+      // Save raw HTML input files for debugging/refining markdown parsing
+      saveInput: params['save-input'] ? true : undefined,
     };
 
     // Compilation options can also be passed if needed, or rely on env vars within the workflow
@@ -230,6 +255,22 @@ async function main() {
       // Check if the argument is a URL
       if (isUrl(fetchArg)) {
         log.verbose(`Detected URL: ${fetchArg}`);
+
+        // Prominent login notice — shown before the browser opens
+        if (params.login) {
+          // eslint-disable-next-line no-console
+          console.log(`
+╔══════════════════════════════════════════════════════════╗
+║                   LOGIN MODE ACTIVE                      ║
+║                                                          ║
+║  A visible browser window will open at the target URL.   ║
+║  Please log in and navigate to the documentation page.   ║
+║  When you are ready, press Enter in this terminal to     ║
+║  begin scraping.                                         ║
+╚══════════════════════════════════════════════════════════╝
+`);
+        }
+
         // Use runSlurpWorkflow instead of scrapeFromUrl
         // Pass version if provided via --version flag
         const fetchOptions = {
@@ -239,6 +280,7 @@ async function main() {
         const generalWorkflowOptions = {
           maxPages: params.max ? parseInt(params.max, 10) : undefined,
           useHeadless: params.headless !== 'false' ? undefined : false,
+          loginFirst: params.login ? true : undefined,
           concurrency: params.concurrency
             ? parseInt(params.concurrency, 10)
             : undefined,
@@ -248,8 +290,8 @@ async function main() {
           retryDelay: params['retry-delay']
             ? parseInt(params['retry-delay'], 10)
             : undefined,
-          // Add base path handling
-          basePath: params['base-path'] || fetchArg, // Default to fetchArg (the url) if --base-path is not provided
+          // Only pass basePath when explicitly provided via --base-path
+          basePath: params['base-path'] || undefined,
           // Keep partials for RAG/Khoj use cases
           deletePartials:
             params['keep-partials'] || params.rag ? false : undefined,
@@ -340,8 +382,9 @@ async function main() {
         const legacyOptions = {
           library: params.library,
           version: params.version,
-          // Add base path handling
-          basePath: params['base-path'] || params.url, // Default to params.url if --base-path is not provided
+          loginFirst: params.login ? true : undefined,
+          // Only pass basePath when explicitly provided via --base-path
+          basePath: params['base-path'] || undefined,
           // Keep partials for RAG use cases
           deletePartials:
             params['keep-partials'] || params.rag ? false : undefined,

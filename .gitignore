@@ -1,8 +1,10 @@
 node_modules/
-# slurps/
-
+slurps/
+slurps_input/
 slurps_partials/
+
 .env
 .DS_Store
 coverage/
 .nyc_output/
+.idea/

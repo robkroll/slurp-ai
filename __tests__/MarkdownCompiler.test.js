@@ -87,7 +87,7 @@ describe('MarkdownCompiler', () => {
       const compiler = new MarkdownCompiler(defaultOptions);
 
       expect(compiler.basePath).toBe('/test/compiler/base'); // From config
-      expect(compiler.inputDir).toBe('/test/compiler/base/env_partials'); // Resolved from config
+      expect(compiler.inputDir).toBe(path.join('/test/compiler/base', 'env_partials')); // Resolved from config
       // Default output path calculation
       const expectedDefaultOutput = path.join('/test/compiler/base', 'slurp_compiled', 'compiled_docs.md');
       expect(compiler.outputFile).toBe(expectedDefaultOutput);
@@ -122,8 +122,8 @@ describe('MarkdownCompiler', () => {
       const compiler = new MarkdownCompiler(options);
 
       expect(compiler.basePath).toBe('/override/base');
-      expect(compiler.inputDir).toBe('/override/base/override_input'); // Resolved
-      expect(compiler.outputFile).toBe('/override/base/override/output/file.md'); // Resolved
+      expect(compiler.inputDir).toBe(path.join('/override/base', 'override_input')); // Resolved
+      expect(compiler.outputFile).toBe(path.join('/override/base', 'override', 'output', 'file.md')); // Resolved
       expect(compiler.preserveMetadata).toBe(false);
       expect(compiler.removeNavigation).toBe(false);
       expect(compiler.removeDuplicates).toBe(false);
@@ -144,22 +144,22 @@ describe('MarkdownCompiler', () => {
         const basePath = '/test/base'; // Use a fixed base for this test
         // 1. Option provided
         let compiler = new MarkdownCompiler({ basePath, inputDir: 'option_dir' });
-        expect(compiler.inputDir).toBe('/test/base/option_dir');
+        expect(compiler.inputDir).toBe(path.join('/test/base', 'option_dir'));
 
         // 2. Option not provided, use config value
         compiler = new MarkdownCompiler({ basePath }); // No inputDir option
-        expect(compiler.inputDir).toBe('/test/base/env_partials'); // From mocked config
+        expect(compiler.inputDir).toBe(path.join('/test/base', 'env_partials')); // From mocked config
      });
 
      it('should correctly determine outputFile precedence: option > default', () => {
          const basePath = '/test/base';
          // 1. Option provided
          let compiler = new MarkdownCompiler({ basePath, outputFile: 'option/output.md' });
-         expect(compiler.outputFile).toBe('/test/base/option/output.md');
+         expect(compiler.outputFile).toBe(path.join('/test/base', 'option', 'output.md'));
 
          // 2. Option not provided, use default
          compiler = new MarkdownCompiler({ basePath }); // No outputFile option
-         expect(compiler.outputFile).toBe('/test/base/slurp_compiled/compiled_docs.md');
+         expect(compiler.outputFile).toBe(path.join('/test/base', 'slurp_compiled', 'compiled_docs.md'));
      });
 
   });

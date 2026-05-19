@@ -86,6 +86,34 @@ function sleep(ms) {
 }
 
 /**
+ * Wait for the user to press Enter in the terminal
+ * @returns {Promise<void>}
+ */
+function waitForEnter() {
+  return new Promise((resolve) => {
+    const { stdin } = process;
+    const wasRaw = stdin.isRaw;
+    if (stdin.isTTY) {
+      stdin.setRawMode(false);
+    }
+    stdin.resume();
+    stdin.setEncoding('utf8');
+    const onData = (data) => {
+      // Treat Enter (\n, \r, \r\n) as confirmation
+      if (data.includes('\n') || data.includes('\r')) {
+        stdin.removeListener('data', onData);
+        stdin.pause();
+        if (stdin.isTTY && wasRaw) {
+          stdin.setRawMode(true);
+        }
+        resolve();
+      }
+    };
+    stdin.on('data', onData);
+  });
+}
+
+/**
  * Calculate exponential backoff delay with jitter
  * @param {number} attempt - Current attempt number (0-indexed)
  * @param {number} baseDelay - Base delay in ms
@@ -401,6 +429,8 @@ class DocsToMarkdown extends EventEmitter {
       markdownTokens: 0,
     };
     this.signal = options.signal;
+    this.loginFirst = options.loginFirst || false;
+    this.saveInputDir = options.saveInputDir || null;
 
     // Add listener to stop queue if signal is aborted externally
     this.signal?.addEventListener('abort', () => {
@@ -493,6 +523,7 @@ class DocsToMarkdown extends EventEmitter {
   configureTurndown() {
     // Setup global references for use in Turndown rules
     globalThis.baseUrl = this.baseUrl;
+    globalThis.currentPageUrl = this.baseUrl; // Updated per-page in processPage()
     globalThis.allowedDomains = this.allowedDomains;
     globalThis.getFilenameForUrl = DocsToMarkdown.getFilenameForUrl;
     this.turndownService.addRule('codeBlock', {
@@ -535,7 +566,9 @@ class DocsToMarkdown extends EventEmitter {
         }
 
         try {
-          const url = new URL(href, globalThis.baseUrl);
+          // Use currentPageUrl (updated per page) for correct relative resolution
+          const resolveBase = globalThis.currentPageUrl || globalThis.baseUrl;
+          const url = new URL(href, resolveBase);
 
           if (href.startsWith('#')) {
             return `[${content}](${href})`;
@@ -553,8 +586,7 @@ class DocsToMarkdown extends EventEmitter {
                 href.startsWith('.') ||
                 (!href.startsWith('/') && !href.startsWith('http'))
               ) {
-                const currentPath = new URL(node.baseURI || globalThis.baseUrl)
-                  .pathname;
+                const currentPath = new URL(resolveBase).pathname;
                 const currentDir = currentPath.substring(
                   0,
                   currentPath.lastIndexOf('/') + 1,
@@ -634,9 +666,11 @@ class DocsToMarkdown extends EventEmitter {
     await fs.ensureDir(this.outputDir);
 
     let browser = null;
-    if (this.useHeadless) {
+    if (this.loginFirst || this.useHeadless) {
+      // If loginFirst is set, always launch a headed (visible) browser so the user can authenticate
+      const headlessMode = this.loginFirst ? false : 'new';
       browser = await puppeteer.launch({
-        headless: 'new',
+        headless: headlessMode,
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',
@@ -647,6 +681,24 @@ class DocsToMarkdown extends EventEmitter {
           '--disable-dev-shm-usage',
         ],
       });
+
+      if (this.loginFirst) {
+        // Open the base URL in a visible browser tab and wait for the user to authenticate
+        const loginPage = await browser.newPage();
+        await loginPage.setDefaultNavigationTimeout(120000);
+        await loginPage.setViewport({ width: 1920, height: 1080 });
+        log.info('Auth', `Opening browser at: ${this.baseUrl}`);
+        try {
+          await loginPage.goto(this.baseUrl, { waitUntil: 'domcontentloaded' });
+        } catch (navErr) {
+          log.warn('Auth', `Initial navigation warning: ${navErr.message}`);
+        }
+        log.info('Auth', 'Please log in using the browser window that just opened.');
+        log.info('Auth', 'Once you are fully authenticated and can see the docs, press Enter here to start scraping...');
+        await waitForEnter();
+        await loginPage.close();
+        log.info('Auth', 'Login confirmed. Starting scrape with authenticated session...');
+      }
     }
 
     this.addToQueue(this.baseUrl, browser);
@@ -782,7 +834,7 @@ class DocsToMarkdown extends EventEmitter {
         log.verbose(
           `${taskId}: Fetching content (headless=${this.useHeadless})...`,
         );
-        if (this.useHeadless && browser) {
+        if ((this.useHeadless || this.loginFirst) && browser) {
           // Retry loop with exponential backoff for Puppeteer
           let lastError = null;
           for (let attempt = 0; attempt <= this.retryCount; attempt++) {
@@ -1087,9 +1139,28 @@ class DocsToMarkdown extends EventEmitter {
    * @param {CheerioStatic} $ - Cheerio instance with loaded HTML
    */
   async processPage(url, $) {
+    // Set the current page URL so Turndown's internalLinks rule resolves
+    // relative hrefs correctly relative to THIS page, not just the root.
+    globalThis.currentPageUrl = url;
+
     // Get raw HTML size for token tracking
     const rawHtml = $.html() || '';
     this.stats.rawHtmlTokens += this.estimateTokens(rawHtml);
+
+    // Save raw HTML if saveInputDir is configured
+    if (this.saveInputDir) {
+      try {
+        const urlObj = new URL(url);
+        const htmlFilename = urlObj.pathname.replace(/\//g, '_') || 'index';
+        const ext = htmlFilename.match(/\.(html?|htm)$/i) ? '' : '.html';
+        const htmlPath = path.join(this.saveInputDir, `${htmlFilename}${ext}`);
+        await fs.ensureDir(this.saveInputDir);
+        await fs.writeFile(htmlPath, rawHtml);
+        log.verbose(`Saved raw HTML to: ${htmlPath}`);
+      } catch (saveErr) {
+        log.verbose(`Failed to save raw HTML for ${url}: ${saveErr.message}`);
+      }
+    }
 
     try {
       const article = await extract(url);
@@ -1112,6 +1183,7 @@ class DocsToMarkdown extends EventEmitter {
         }
 
         markdown = this.cleanupMarkdown(markdown);
+        markdown = this.resolveRelativeLinks(markdown, url);
 
         // Track markdown tokens
         this.stats.markdownTokens += this.estimateTokens(markdown);
@@ -1147,6 +1219,7 @@ class DocsToMarkdown extends EventEmitter {
     }
 
     markdown = this.cleanupMarkdown(markdown);
+    markdown = this.resolveRelativeLinks(markdown, url);
 
     // Track markdown tokens
     this.stats.markdownTokens += this.estimateTokens(markdown);
@@ -1155,7 +1228,38 @@ class DocsToMarkdown extends EventEmitter {
   }
 
   /**
-   * Preprocess a URL to determine if it should be added to the queue
+   * Post-process markdown to resolve remaining relative HTML links to .md filenames.
+   * Some links may not be resolved by Turndown's internalLinks rule (e.g., when
+   * article-extractor modifies the content before Turndown processes it).
+   * @param {string} markdown - The markdown content
+   * @param {string} pageUrl - The URL of the current page (for resolving relative links)
+   * @returns {string} Markdown with resolved links
+   */
+  resolveRelativeLinks(markdown, pageUrl) {
+    // Match markdown links with relative .html/.htm hrefs: [text](relative.html) or [text](../path/file.html)
+    return markdown.replace(/\[([^\]]+)\]\(([^)]+\.html?(?:#[^)]*)?)\)/gi, (match, text, href) => {
+      // Skip if already an absolute URL
+      if (href.startsWith('http://') || href.startsWith('https://')) {
+        return match;
+      }
+      // Skip javascript: links
+      if (href.startsWith('javascript:')) {
+        return match;
+      }
+      try {
+        const resolvedUrl = new URL(href, pageUrl).toString();
+        const filename = DocsToMarkdown.getFilenameForUrl(resolvedUrl);
+        // Preserve hash fragment if present
+        const hashIndex = href.indexOf('#');
+        const hash = hashIndex !== -1 ? href.substring(hashIndex) : '';
+        return `[${text}](${filename}${hash})`;
+      } catch {
+        return match;
+      }
+    });
+  }
+
+  /**
    * @param {string} url - The URL to process
    * @returns {string|null} - Normalized URL or null if rejected
    */
@@ -1253,17 +1357,21 @@ class DocsToMarkdown extends EventEmitter {
         }
       }
 
-      const pathSegments = urlObj.pathname.split('/').filter(Boolean);
-      if (pathSegments.length > urlFiltering.depthNumberOfSegments) {
-        const docPatterns = urlFiltering.depthSegmentCheck;
-        let isDocPath = false;
+      // Skip depth check when enforceBasePath is active and the URL already passed
+      // the base path check above — the base path constraint is sufficient.
+      const skipDepthCheck = this.enforceBasePath;
 
-        isDocPath = docPatterns.some((pattern) =>
-          urlObj.pathname.includes(pattern),
-        );
+      if (!skipDepthCheck) {
+        const pathSegments = urlObj.pathname.split('/').filter(Boolean);
+        if (pathSegments.length > urlFiltering.depthNumberOfSegments) {
+          const docPatterns = urlFiltering.depthSegmentCheck;
+          const isDocPath = docPatterns.some((pattern) =>
+            urlObj.pathname.includes(pattern),
+          );
 
-        if (!isDocPath) {
-          return null;
+          if (!isDocPath) {
+            return null;
+          }
         }
       }
 
@@ -1336,7 +1444,7 @@ class DocsToMarkdown extends EventEmitter {
 
     let outputDir = resolvePath(this.outputDir, this.basePath);
 
-    if (options.library) {
+    if (options.library && !options.skipDirectoryNesting) {
       outputDir = path.join(outputDir, options.library);
 
       if (options.version) {

@@ -1,5 +1,6 @@
 // __tests__/DocumentationScraper.test.js
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import path from 'path';
 import DocsToMarkdown from '../src/DocumentationScraper.js';
 import { URL } from 'url';
 
@@ -271,7 +272,7 @@ describe('DocsToMarkdown', () => {
     it('should initialize with default options and environment variables', () => {
       const scraper = new DocsToMarkdown(defaultOptions);
       expect(scraper.baseUrl).toBe('https://example.com/docs/v1/');
-      expect(scraper.outputDir).toBe('/test/base/test_partials');
+      expect(scraper.outputDir).toBe(path.join('/test/base', 'test_partials'));
       expect(scraper.visitedUrls).toEqual(new Set());
       expect(scraper.queuedUrls).toEqual(new Set());
       expect(scraper.inProgressUrls).toEqual(new Set());
@@ -294,12 +295,12 @@ describe('DocsToMarkdown', () => {
 it('should handle output directory paths with options and config', () => {
   // 1. Option provided
   let scraper = new DocsToMarkdown({ ...defaultOptions, outputDir: 'option_dir' });
-  expect(scraper.outputDir).toBe('/test/base/option_dir');
+  expect(scraper.outputDir).toBe(path.join('/test/base', 'option_dir'));
 
   // 2. Option not provided, use config
   delete defaultOptions.outputDir;
   scraper = new DocsToMarkdown({ ...defaultOptions }); // No outputDir option
-  expect(scraper.outputDir).toBe('/test/base/test_partials'); // From mocked config
+  expect(scraper.outputDir).toBe(path.join('/test/base', 'test_partials')); // From mocked config
 });
     
     it('should handle base path with options and config', () => {
@@ -719,7 +720,7 @@ it('should handle output directory paths with options and config', () => {
     const testUrl = 'https://example.com/docs/v1/test-page';
     const markdownContent = '# Test Content\n\nThis is a test.';
     const expectedFilename = '_docs_v1_test-page.md'; // Based on getFilenameForUrl
-    const baseOutputDir = '/test/base/test_partials'; // From defaultOptions + env
+    const baseOutputDir = path.join('/test/base', 'test_partials'); // From defaultOptions + env
 
     beforeEach(() => {
       scraper = new DocsToMarkdown(defaultOptions);
@@ -737,7 +738,7 @@ it('should handle output directory paths with options and config', () => {
       await scraper.saveMarkdown(testUrl, markdownContent);
 
       // Check that the output directory was created
-      const expectedPath = `${baseOutputDir}/${expectedFilename}`;
+      const expectedPath = path.join(baseOutputDir, expectedFilename);
       expect(fs.ensureDir).toHaveBeenCalledWith(baseOutputDir);
       expect(fs.writeFile).toHaveBeenCalledTimes(1);
       
@@ -767,8 +768,8 @@ it('should handle output directory paths with options and config', () => {
       await scraper.saveMarkdown(testUrl, markdownContent, options);
 
       // Check that the nested directories were created
-      const expectedDir = `${baseOutputDir}/testlib/2.5.0`;
-      const expectedPath = `${expectedDir}/${expectedFilename}`;
+      const expectedDir = path.join(baseOutputDir, 'testlib', '2.5.0');
+      const expectedPath = path.join(expectedDir, expectedFilename);
       expect(fs.ensureDir).toHaveBeenCalledWith(expectedDir);
       
       // Check that the file was written to the correct path

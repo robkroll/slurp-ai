@@ -2,7 +2,6 @@ import path from 'path';
 import fs from 'fs-extra';
 import { URL } from 'url';
 import DocumentationScraper from './DocumentationScraper.js';
-import { MarkdownCompiler } from './MarkdownCompiler.js';
 import { log } from './utils/logger.js';
 import { fetchSitemap, ProgressEstimator } from './utils/sitemap.js';
 import {
@@ -10,7 +9,7 @@ import {
   chunksToJsonl,
   chunksToMarkdownFiles,
 } from './utils/chunker.js';
-import { paths, scraping, urlFiltering, compilation } from '../config.js';
+import { paths, scraping, urlFiltering } from '../config.js';
 
 /**
  * Attempts to detect a version string from a URL.
@@ -156,8 +155,8 @@ function extractNameFromUrl(url) {
  * @param {object} [options={}] - Configuration options.
  * @param {string} [options.version] - Optional version string to include in paths.
  * @param {string} [options.basePath] - URL prefix required for scraped links (if SLURP_ENFORCE_BASE_PATH=true). Defaults to the start URL if omitted.
- * @param {string} [options.partialsOutputDir] - Base directory for intermediate partial files. Defaults to env SLURP_PARTIALS_DIR or './slurp_partials'.
- * @param {string} [options.compiledOutputDir] - Directory for the final compiled file. Defaults to env SLURP_COMPILED_DIR or './compiled'.
+ * @param {string} [options.partialsOutputDir] - Base directory for per-page markdown files. Defaults to env SLURP_PARTIALS_DIR or './slurps'.
+ * @param {string} [options.compiledOutputDir] - Directory for the optional compiled file (only used when options.compile is true). Defaults to env SLURP_COMPILED_DIR or './slurps_compiled'.
  * @param {number} [options.maxPages=20] - Maximum pages to scrape. Defaults to env SLURP_MAX_PAGES_PER_SITE or 20.
  * @param {boolean} [options.useHeadless=true] - Whether to use a headless browser. Defaults to true.
  * @param {number} [options.concurrency=10] - Number of concurrent scraping requests. Defaults to env SLURP_CONCURRENCY or 10.
@@ -191,46 +190,72 @@ async function runSlurpWorkflow(url, options = {}) {
     log.header(url);
 
     // --- Determine Paths ---
-    const siteName = extractNameFromUrl(url);
+    const siteName = options.folder || extractNameFromUrl(url);
     const { version } = options;
 
-    const basePartialsDir = options.partialsOutputDir || paths.inputDir;
-    const compiledOutputDir = options.compiledOutputDir || paths.outputDir;
+    // Per-page output directory: slurps/<sitename>[/<version>]/
+    const baseOutputDir = options.partialsOutputDir || paths.outputDir;
+    const absoluteOutputDir = path.isAbsolute(baseOutputDir)
+      ? baseOutputDir
+      : path.join(process.cwd(), baseOutputDir);
 
-    const absolutePartialsDir = path.isAbsolute(basePartialsDir)
-      ? basePartialsDir
-      : path.join(process.cwd(), basePartialsDir);
-
-    structuredPartialsDir = path.join(absolutePartialsDir, siteName);
+    structuredPartialsDir = path.join(absoluteOutputDir, siteName);
     if (version) {
       structuredPartialsDir = path.join(structuredPartialsDir, version);
     }
 
-    const absoluteCompiledDir = path.isAbsolute(compiledOutputDir)
-      ? compiledOutputDir
-      : path.join(process.cwd(), compiledOutputDir);
-    const outputFilename = `${siteName}${version ? `_${version}` : ''}.md`;
-    const finalCompiledPath = path.join(absoluteCompiledDir, outputFilename);
-
     await fs.ensureDir(structuredPartialsDir);
-    await fs.ensureDir(absoluteCompiledDir);
 
-    log.verbose(`Partials directory: ${structuredPartialsDir}`);
-    log.verbose(`Compiled output path: ${finalCompiledPath}`);
+    log.verbose(`Per-page output directory: ${structuredPartialsDir}`);
+
+    // --- Save Input Mode ---
+    let saveInputDir = null;
+    if (options.saveInput) {
+      saveInputDir = path.join(process.cwd(), 'slurps_input', siteName);
+      await fs.ensureDir(saveInputDir);
+      log.verbose(`Save input directory: ${saveInputDir}`);
+    }
 
     // --- Configure Scraper ---
+    // Derive a basePath from the URL for enforceBasePath filtering.
+    // When the URL points to a file (e.g. /Content/default.html) use its
+    // parent directory so sibling/cousin pages are still allowed through.
+    // E.g. https://example.com/idp/help/Content/default.html
+    //   → basePath = https://example.com/idp/help/Content/
+    // If --base-path is explicitly supplied, use that verbatim.
+    let defaultBasePath = url;
+    if (!options.basePath) {
+      try {
+        const urlForBase = new URL(url);
+        // If the pathname looks like a file (has an extension) strip the filename
+        const lastSegment = urlForBase.pathname.split('/').pop();
+        if (lastSegment && lastSegment.includes('.')) {
+          urlForBase.pathname = urlForBase.pathname.substring(
+            0,
+            urlForBase.pathname.lastIndexOf('/') + 1,
+          );
+        }
+        urlForBase.search = '';
+        urlForBase.hash = '';
+        defaultBasePath = urlForBase.toString();
+      } catch {
+        defaultBasePath = url;
+      }
+    }
+
     const scrapeConfig = {
       baseUrl: url,
-      basePath: options.basePath || url,
+      basePath: options.basePath || defaultBasePath,
       enforceBasePath:
         options.basePath !== undefined || urlFiltering.enforceBasePath,
-      outputDir: structuredPartialsDir,
-      maxPages: options.maxPages ?? scraping.maxPagesPerSite,
+      outputDir: structuredPartialsDir,      maxPages: options.maxPages ?? scraping.maxPagesPerSite,
       useHeadless: options.useHeadless ?? !scraping.useHeadless,
+      loginFirst: options.loginFirst ?? false,
       libraryInfo: {
         library: siteName,
         version: version || '',
         sourceType: 'url',
+        skipDirectoryNesting: true,
       },
       contentSelector:
         'main, .content, .document, article, .documentation, .main-content',
@@ -282,6 +307,7 @@ async function runSlurpWorkflow(url, options = {}) {
         }
       },
       signal: options.signal,
+      saveInputDir,
     };
 
     log.verbose(
@@ -399,125 +425,24 @@ async function runSlurpWorkflow(url, options = {}) {
 
     if (scrapeStats.processed === 0) {
       throw new Error(
-        'Scraping completed, but no pages were successfully processed. Cannot compile.',
+        'Scraping completed, but no pages were successfully processed.',
       );
-    }
-
-    // --- Configure Compiler ---
-    const compileOptions = {
-      inputDir: structuredPartialsDir,
-      outputFile: finalCompiledPath,
-      preserveMetadata:
-        options.preserveMetadata ?? compilation.preserveMetadata,
-      removeNavigation:
-        options.removeNavigation ?? compilation.removeNavigation,
-      removeDuplicates:
-        options.removeDuplicates ?? compilation.removeDuplicates,
-    };
-
-    const compiler = new MarkdownCompiler(compileOptions);
-
-    // Detect version and set metadata
-    const detectedVersion = version || detectVersionFromUrl(url);
-    compiler.setMetadata({
-      url,
-      title: `${siteName} Documentation`,
-      version: detectedVersion,
-    });
-
-    // --- Run Compiler ---
-    log.spinnerStart('Compiling', 'processing files...');
-    log.spinnerLog('Reading scraped markdown files...');
-    log.spinnerLog('Extracting frontmatter metadata...');
-
-    const compileResult = await compiler.compile();
-
-    // Log compilation activities
-    log.spinnerLog('Removing duplicate content sections...');
-    log.spinnerLog('Stripping navigation elements...');
-    log.spinnerLog('Consolidating into single document...');
-
-    const relativeOutputPath = path.relative(
-      process.cwd(),
-      compileResult.outputFile,
-    );
-
-    log.spinnerSucceed('Compiling', {
-      count: compileResult.stats.processedFiles,
-      label: 'files',
-      output: relativeOutputPath,
-    });
-
-    log.verbose(`Compiler Stats: ${JSON.stringify(compileResult.stats)}`);
-
-    if (compileResult.stats.processedFiles === 0) {
-      log.warn(
-        'Compiling',
-        'Compilation finished, but no files were processed.',
-      );
-    }
-
-    // --- RAG Per-Page Output (if enabled) ---
-    let ragOutputResult = null;
-    if (options.enableRagOutput) {
-      log.start('RAG Output', 'Creating per-page RAG files...');
-
-      const ragDir = path.join(absoluteCompiledDir, `${siteName}-rag`);
-      await fs.ensureDir(ragDir);
-
-      // Read all partial files and copy with clean names
-      const partialFiles = await fs.readdir(structuredPartialsDir, { recursive: true });
-      const mdFiles = partialFiles.filter((f) => f.endsWith('.md'));
-      let fileCount = 0;
-
-      for (const relPath of mdFiles) {
-        const fullPath = path.join(structuredPartialsDir, relPath);
-        const content = await fs.readFile(fullPath, 'utf-8');
-
-        // Extract URL from frontmatter to create clean filename
-        const urlMatch = content.match(/^url:\s*(.+)$/m);
-        const sourceUrl = urlMatch ? urlMatch[1].trim() : '';
-
-        // Create clean filename from URL path
-        let cleanName = relPath;
-        if (sourceUrl) {
-          try {
-            const urlObj = new URL(sourceUrl);
-            // Get the last meaningful part of the path
-            const pathParts = urlObj.pathname.split('/').filter(Boolean);
-            if (pathParts.length > 0) {
-              // Use last 2-3 parts for context
-              const relevantParts = pathParts.slice(-3);
-              cleanName = relevantParts.join('-') + '.md';
-            }
-          } catch {
-            // Keep original name if URL parsing fails
-          }
-        }
-
-        // Sanitize filename
-        cleanName = cleanName
-          .replace(/[^a-zA-Z0-9-_.]/g, '-')
-          .replace(/-+/g, '-')
-          .replace(/^-|-$/g, '');
-
-        if (!cleanName.endsWith('.md')) {
-          cleanName += '.md';
-        }
-
-        // Write to RAG output folder
-        await fs.writeFile(path.join(ragDir, cleanName), content);
-        fileCount++;
-      }
-
-      log.success('RAG Output', `Created ${fileCount} files → ${ragDir}/`);
-      ragOutputResult = { path: ragDir, count: fileCount };
     }
 
     // --- RAG Chunking (if enabled) ---
     let chunkingResult = null;
     if (options.enableChunking) {
       log.start('Chunking', 'Creating RAG chunks...');
+
+      // Read all scraped files and concatenate for chunking
+      const allFiles = await fs.readdir(structuredPartialsDir, { recursive: true });
+      const mdFiles = allFiles.filter((f) => f.endsWith('.md'));
+      let combinedContent = '';
+      for (const relPath of mdFiles) {
+        const fullPath = path.join(structuredPartialsDir, relPath);
+        combinedContent += await fs.readFile(fullPath, 'utf-8');
+        combinedContent += '\n\n';
+      }
 
       const chunkOptions = {
         maxTokens: options.chunkSize || 1000,
@@ -526,24 +451,22 @@ async function runSlurpWorkflow(url, options = {}) {
         title: siteName,
       };
 
-      // Read the compiled file and chunk it
-      const compiledContent = await fs.readFile(compileResult.outputFile, 'utf-8');
-      const chunks = chunkMarkdown(compiledContent, chunkOptions);
+      const chunks = chunkMarkdown(combinedContent, chunkOptions);
 
-      // Determine output format and directory
       const chunkFormat = options.chunkFormat || 'markdown';
-      const chunksDir = path.join(absoluteCompiledDir, `${siteName}-chunks`);
+      const absoluteOutputDir = path.isAbsolute(options.partialsOutputDir || paths.outputDir)
+        ? (options.partialsOutputDir || paths.outputDir)
+        : path.join(process.cwd(), options.partialsOutputDir || paths.outputDir);
+      const chunksDir = path.join(absoluteOutputDir, `${siteName}-chunks`);
       await fs.ensureDir(chunksDir);
 
       if (chunkFormat === 'jsonl') {
-        // Output as JSONL file
         const jsonlContent = chunksToJsonl(chunks);
         const jsonlPath = path.join(chunksDir, 'chunks.jsonl');
         await fs.writeFile(jsonlPath, jsonlContent);
         log.success('Chunking', `Created ${chunks.length} chunks → ${jsonlPath}`);
         chunkingResult = { format: 'jsonl', path: jsonlPath, count: chunks.length };
       } else {
-        // Output as individual markdown files
         const chunkFiles = chunksToMarkdownFiles(chunks);
         for (const file of chunkFiles) {
           await fs.writeFile(path.join(chunksDir, file.filename), file.content);
@@ -552,7 +475,6 @@ async function runSlurpWorkflow(url, options = {}) {
         chunkingResult = { format: 'markdown', path: chunksDir, count: chunks.length };
       }
 
-      // Log chunk statistics
       const totalTokens = chunks.reduce((sum, c) => sum + c.tokens, 0);
       const avgTokens = Math.round(totalTokens / chunks.length);
       log.verbose(
@@ -560,29 +482,25 @@ async function runSlurpWorkflow(url, options = {}) {
       );
     }
 
-    // --- Cleanup Partials ---
-    const shouldDeletePartials = options.deletePartials ?? true;
-    if (shouldDeletePartials && compileResult.stats.processedFiles > 0) {
-      log.verbose(`Deleting partials directory: ${structuredPartialsDir}`);
-      await fs.remove(structuredPartialsDir);
-      log.verbose(`Partials directory deleted.`);
-    } else if (shouldDeletePartials) {
-      log.verbose(`Skipping partials deletion as no files were compiled.`);
-    }
-
     // --- Final Success Message ---
-    // Combine scraper and compiler stats for full pipeline view
+    const relativeOutputPath = path.relative(process.cwd(), structuredPartialsDir);
     const combinedStats = {
-      ...compileResult.stats,
+      processedFiles: scrapeStats.processed,
       rawHtmlTokens: scrapeStats.rawHtmlTokens || 0,
       scrapeMarkdownTokens: scrapeStats.markdownTokens || 0,
+      // log.done() checks for cleanedTokens — provide a safe value so it
+      // doesn't crash when the token-reduction block is entered.
+      cleanedTokens: scrapeStats.markdownTokens || 0,
     };
-    log.done(relativeOutputPath, compileResult.outputFile, combinedStats);
+    log.done(relativeOutputPath, structuredPartialsDir, combinedStats);
 
     // --- Return Success ---
     return {
       success: true,
+      outputDir: relativeOutputPath,
+      // Legacy alias so callers that expect compiledFilePath still get a value
       compiledFilePath: relativeOutputPath,
+      chunkingResult,
     };
   } catch (error) {
     // Stop any active spinner
@@ -600,20 +518,6 @@ async function runSlurpWorkflow(url, options = {}) {
       throw error;
     }
 
-    if (structuredPartialsDir && (options.deletePartials ?? true)) {
-      try {
-        log.verbose(
-          `Attempting cleanup of partials directory on error: ${structuredPartialsDir}`,
-        );
-        await fs.remove(structuredPartialsDir);
-        log.verbose(`Partials directory deleted during error cleanup.`);
-      } catch (cleanupError) {
-        log.warn(
-          'Cleanup',
-          `Failed to cleanup partials directory during error handling: ${cleanupError.message}`,
-        );
-      }
-    }
     return { success: false, error };
   }
 }

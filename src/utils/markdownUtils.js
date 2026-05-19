@@ -210,6 +210,11 @@ function cleanupMarkdown(markdown) {
   result = result.replace(/\*\s*\n\s*\*/g, '*');
 
   // 8. Strip any remaining HTML tags that leaked through (common in MkDocs/Material)
+  // Remove colgroup/col tags (table column styling)
+  result = result.replace(/<colgroup>[\s\S]*?<\/colgroup>/gi, '');
+  result = result.replace(/<\/?colgroup[^>]*>/gi, '');
+  result = result.replace(/<col[^>]*\/?>/gi, '');
+
   // Remove table structure tags
   result = result.replace(/<\/?table[^>]*>/gi, '');
   result = result.replace(/<\/?tbody[^>]*>/gi, '');
@@ -218,8 +223,19 @@ function cleanupMarkdown(markdown) {
   result = result.replace(/<\/?td[^>]*>/gi, '');
   result = result.replace(/<\/?th[^>]*>/gi, '');
 
+  // Convert remaining <a href="...">text</a> to markdown links
+  result = result.replace(/<a\s+[^>]*href="([^"]*)"[^>]*>([^<]+)<\/a>/gi, '[$2]($1)');
+
   // Remove empty anchor tags: <a></a> or <a id="..."></a>
   result = result.replace(/<a[^>]*><\/a>/gi, '');
+  // Remove any remaining <a> tags (opening/closing) that weren't caught
+  result = result.replace(/<\/?a[^>]*>/gi, '');
+
+  // Convert <b> and <strong> to markdown bold
+  result = result.replace(/<(b|strong)[^>]*>([\s\S]*?)<\/\1>/gi, '**$2**');
+
+  // Convert <i> and <em> to markdown italic
+  result = result.replace(/<(i|em)[^>]*>([\s\S]*?)<\/\1>/gi, '*$2*');
 
   // Remove span tags (syntax highlighting remnants)
   result = result.replace(/<\/?span[^>]*>/gi, '');
@@ -231,22 +247,36 @@ function cleanupMarkdown(markdown) {
   result = result.replace(/<\/?pre[^>]*>/gi, '');
   result = result.replace(/<\/?code[^>]*>/gi, '');
 
-  // 9. Remove empty markdown links: [](url)
+  // Remove <br> tags - replace with newline
+  result = result.replace(/<br\s*\/?>/gi, '\n');
+
+  // Remove <p> tags
+  result = result.replace(/<\/?p[^>]*>/gi, '');
+
+  // Remove any other remaining HTML tags as a final catch-all
+  result = result.replace(/<\/?[a-z][a-z0-9]*[^>]*>/gi, '');
+
+  // 9. Convert HTML entities
+  result = result.replace(/&nbsp;/g, ' ');
+  result = result.replace(/&lt;/g, '<');
+  result = result.replace(/&gt;/g, '>');
+  result = result.replace(/&amp;/g, '&');
+  result = result.replace(/&quot;/g, '"');
+  result = result.replace(/&#039;/g, "'");
+
+  // 10. Remove empty markdown links: [](url)
   result = result.replace(/\[\]\([^)]+\)/g, '');
 
-  // 10. Remove codelineno references that leaked into content
-  // Pattern: [](_file.md#__codelineno-N-M)
+  // 11. Remove codelineno references that leaked into content
   result = result.replace(/\[\]\([^)]*#__codelineno-[^)]+\)/g, '');
-
-  // Also clean inline codelineno patterns
   result = result.replace(/\[?\]?\([^)]*#__codelineno-[^)]*\)/g, '');
 
-  // 11. Clean up any double-escaped HTML entities that might result
+  // 12. Clean up any double-escaped HTML entities that might result
   result = result.replace(/&amp;lt;/g, '&lt;');
   result = result.replace(/&amp;gt;/g, '&gt;');
   result = result.replace(/&amp;amp;/g, '&amp;');
 
-  // 12. Final cleanup - normalize excessive whitespace from removed tags
+  // 13. Final cleanup - normalize excessive whitespace from removed tags
   result = result.replace(/\n{3,}/g, '\n\n');
   result = result.replace(/[ \t]+\n/g, '\n');
 
